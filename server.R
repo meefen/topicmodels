@@ -51,14 +51,14 @@ preprocessing <- function() {
                        topic=factor(topics(lda, 1)),
                        text=notes$text)
   
-  save(lda, file="lda.R")
-  save(points, file="points.R")
+  save(lda, file="lda.Rdata")
+  save(points, file="points.Rdata")
 }
 
 ## Check whether need to run preprocessing()
-if(file.exists("lda.R") && file.exists("points.R")) {
-  load("lda.R")
-  load("points.R")
+if(file.exists("lda.Rdata") && file.exists("points.Rdata")) {
+  load("lda.Rdata")
+  load("points.Rdata")
 } else {
   preprocessing()
 }
@@ -113,8 +113,7 @@ shinyServer(function(input, output) {
   ## Details of all notes and their topics
   output$gvDetails <- renderGvis({
     points$text <- gsub("\n", " ", points$text)
-    gvisTable(points[, c("id", "view", "author", "topic", "text")], 
-              options=list(page="enable", pageSize=15))
+    gvisTable(points[, c("id", "view", "author", "topic", "text")])
   })
   
   ## Table of topic summary
