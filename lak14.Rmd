@@ -1,0 +1,241 @@
+LAK14
+========================================================
+
+## Setup
+
+```{r}
+# load libraries
+library(stringr)
+library(ggplot2)
+library(topicmodels)
+library(tm)
+library(slam)
+library(lle)
+```
+
+## Read Grade 4 data
+
+May consider importing data about the same topic from other classes later.
+
+```{r}
+### Read data
+notes <- read.csv("KFNotes_HowLightTravels.csv", stringsAsFactors=FALSE)
+
+# remove scaffolds and references
+notes$text1 <- gsub("[{].+[}]", " ", notes$text)
+notes$text1 <- gsub("\\[\\[.+\\]\\]", " ", notes$text1)
+
+# trying to fix spelling, so LDA training can be more accurate
+# there are typos in students' writing too
+notes$text1 <- gsub("color", "colour", notes$text1)
+
+# merge title with text
+notes$ttext <- paste(notes$title, notes$text1)
+```
+
+## Train LDA model
+
+```{r}
+## create corpus
+corpus <- Corpus(VectorSource(notes$ttext))
+
+# remove some additional stopwords (found them by studying terms under trained topics)
+stopwords <- c("can", "does", "will")
+corpus <- tm_map(corpus, function(x) 
+  removeWords(x, stopwords))
+
+## export corpus to a document-term matrix
+dtm <- DocumentTermMatrix(corpus, control = list(
+  stemming = TRUE, stopwords = TRUE, minWordLength = 3, 
+  removeNumbers = TRUE, removePunctuation = TRUE))
+
+## select the vocabulary based on mean tf-idf
+term_tfidf <- tapply(dtm$v/row_sums(dtm)[dtm$i], dtm$j, mean) * 
+  log2(nDocs(dtm)/col_sums(dtm > 0))
+dtm <- dtm[ , term_tfidf >= 0.1]
+dtm <- dtm[row_sums(dtm) > 0, ]
+
+## fit LDA model, k is determined based on Jianwei's paper (15 big threads)
+lda <- LDA(dtm, k = 15, control = list(seed = 2013)) # k = number of topics
+# save(lda, file="lda.Rdata")
+```
+
+## Explore results
+
+### Topics
+
+```{r}
+# topic summary
+topics <- terms(lda, 5)
+words <- apply(topics, 2, function(x) paste(x, collapse = " "))
+data.frame(topic=names(words), words=as.vector(words))
+```
+
+By studying words under each topic, a lot of topics make sense. Quite nice training results.
+
+For the paper, I will try to read related terms and notes, and try to name each topic. Then I will pick a few topics, and track their progress overtime using the visual below.
+
+### Notes and topics
+
+```{r}
+results <- data.frame(id=notes$id, view=notes$view, 
+                      topic=factor(topics(lda, 1)), 
+                      text=substr(notes$title, 1, 50))
+# results
+
+# number of notes under each topic
+sort(summary(results$topic), decreasing=TRUE)
+```
+
+### Visualization
+
+```{r}
+### Locally Linear Embedding (LLE) -- reduce dimension
+
+# Get loading matrix of documents on topics
+loading <- posterior(lda, newdata = dtm)
+
+# LLE
+X <- loading$topics
+calc_k(X, 2, 1, 15, FALSE) # choose k with the smallest rho
+results <- lle(X=X, m=2, k=7, reg=2, ss=FALSE, id=TRUE, v=0.9)
+time_numeric <- as.numeric(as.POSIXct(strptime(notes$time, "%m/%d/%Y %H:%M:%S")))
+time_rank <- rank(time_numeric)
+# time_numeric <- as.integer((time_numeric - min(time_numeric)) / 3600 / 24)
+points <- data.frame(x=round(results$Y[, 1], 2), 
+                     y=round(results$Y[, 2], 2), 
+                     id=notes$id,
+                     view=notes$view, 
+                     author=notes$from_user, 
+                     time=time_rank, 
+                     topic=factor(topics(lda, 1)),
+                     title=notes$title)
+# save(points, file="points.Rdata")
+```
+
+By topic
+
+```{r}
+# qplot(results$id, main="intrinsic dimension")
+ggplot(points, aes(x=x,y=y)) + 
+  geom_point(data=points, shape=19, aes(x=x, y=y, color=topic), position=position_jitter(w=0.5, h=0.5))
+ggsave(file="figure/viz_topic.pdf", width=10, height=8)
+```
+
+By view
+
+```{r}
+ggplot(points, aes(x=x,y=y)) + 
+  geom_point(data=points, shape=19, aes(x=x, y=y, color=view), position=position_jitter(w=0.5, h=0.5))
+
+# add topics
+ggplot(points, aes(x=x,y=y)) + 
+  geom_point(data=points, aes(x=x, y=y, color=topic, shape=view), size=3, position=position_jitter(w=0.5, h=0.5))
+ggsave(file="figure/viz_topic_view.pdf", width=10, height=8)
+```
+
+By time
+
+```{r}
+ggplot(points, aes(x=x,y=y)) + 
+  geom_point(data=points, shape=19, aes(x=x, y=y, color=time), position=position_jitter(w=0.5, h=0.5)) +
+  scale_colour_gradient2(mid="red", high="blue")
+ggsave(file="figure/viz_time.pdf", width=12, height=8)
+```
+
+By students
+
+```{r}
+all_author <- 1:nrow(notes)
+co_author <- grep(",",notes$from_user)
+single_author <- all_author[is.na(match(all_author, co_author))]
+points_sub_stu <- points[single_author, ]
+points_sub_stu$author <- factor(points_sub_stu$author)
+
+ggplot(points_sub_stu, aes(x=x,y=y)) + 
+  geom_point(data=points_sub_stu, shape=19, aes(x=x, y=y, color=author), position=position_jitter(w=0.5, h=0.5))
+ggsave(file="figure/viz_stu.pdf", width=12, height=8)
+```
+
+### Evolution of topics
+
+```{r}
+## create timeseries data
+# prepare data needed
+notes_ts <- points[, c("time", "topic", "view")]
+notes_ts <- notes_ts[with(notes_ts, order(time)), ]
+
+# create time
+ts <- data.frame(time=integer(), topic=factor(), count=integer())
+topic_nums <- rep(0, length(levels(notes_ts$topic)))
+for(i in 1:nrow(notes_ts)) {
+  topic <- notes_ts$topic[i]
+  topic_nums[topic] <- topic_n <- topic_nums[topic] + 1
+  ts <- rbind(ts, c(i, topic, topic_n))
+  for(t in 1:length(levels(notes_ts$topic))) {
+    if(t != topic) ts <- rbind(ts, c(i, t, topic_nums[t]))
+  }
+}
+names(ts) <- c("time", "topic", "count")
+ts$topic <- factor(ts$topic)
+
+# plot results
+ggplot(ts, aes(x=time, y=count, colour=topic, group=topic)) + geom_line()
+```
+
+Maybe it's better to select a few topics to track, rather than tracking all 15 topics.
+
+```{r}
+# here we go -- visualizing a subset of topics, 150/308 of all notes
+vt_idx <- c(3, 9, 5, 4, 6)
+vt_name <- c("reflection", "refraction", "source of light", "travel", "materials")
+top_topics <- data.frame(topic = vt_idx, name = vt_name)
+top_topics <- top_topics[with(top_topics, order(topic)), ]
+
+# a subset of note points
+notes_ts_sub <- points[points$topic %in% vt_idx, c("time", "topic", "view")]
+notes_ts_sub$topic <- factor(notes_ts_sub$topic)
+
+# create time
+ts <- data.frame(time=integer(), topic=factor(), count=integer())
+topic_nums <- rep(0, length(levels(notes_ts_sub$topic)))
+for(i in 1:nrow(notes_ts_sub)) {
+  topic <- notes_ts_sub$topic[i]
+  topic_nums[topic] <- topic_n <- topic_nums[topic] + 1
+  ts <- rbind(ts, c(i, topic, topic_n))
+  for(t in 1:length(levels(notes_ts_sub$topic))) {
+    if(t != topic) ts <- rbind(ts, c(i, t, topic_nums[t]))
+  }
+}
+names(ts) <- c("time", "topic", "count")
+ts$topic <- factor(ts$topic, labels=top_topics$name)
+
+# plot results
+ggplot(ts, aes(x=time, y=count, colour=topic, group=topic)) + geom_line()
+ggsave(file="figure/viz_topics.pdf", width=12, height=8)
+```
+
+
+
+Participation in views
+
+```{r}
+# create time
+ts_v <- data.frame(integer(), integer(), integer())
+view_nums <- rep(0, length(levels(notes_ts$view)))
+for(i in 1:nrow(notes_ts)) {
+  view <- notes_ts$view[i]
+  view_nums[view] <- view_n <- view_nums[view] + 1
+  ts_v <- rbind(ts_v, c(i, view, view_n))
+  for(t in 1:length(levels(notes_ts$view))) {
+    if(t != view) ts_v <- rbind(ts_v, c(i, t, view_nums[t]))
+  }
+}
+names(ts_v) <- c("time", "view", "count")
+ts_v$view <- factor(ts_v$view, labels=levels(notes_ts$view))
+
+# plot results
+ggplot(ts_v, aes(x=time, y=count, colour=view, group=view)) + geom_line()
+ggsave(file="figure/viz_views.pdf", width=12, height=8)
+```
+
